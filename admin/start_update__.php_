@@ -1,0 +1,441 @@
+<?php
+require_once $_SERVER['DOCUMENT_ROOT'] . '/bitrix/modules/main/include/prolog_admin_before.php';
+
+global $USER;
+
+// Проверяем авторизацию
+if (!$USER->IsAdmin()) {
+    header('Content-Type: application/json');
+    echo json_encode(['success' => false, 'message' => 'Not admin']);
+    exit;
+}
+
+// Проверяем sessid
+if (!check_bitrix_sessid()) {
+    header('Content-Type: application/json');
+    echo json_encode(['success' => false, 'message' => 'Invalid sessid']);
+    exit;
+}
+
+// Подключаем модули
+if (!CModule::IncludeModule("iblock") || !CModule::IncludeModule("catalog") || !CModule::IncludeModule("highloadblock")) {
+    header('Content-Type: application/json');
+    echo json_encode(['success' => false, 'message' => 'Modules not found']);
+    exit;
+}
+
+// Очищаем буфер вывода на случай лишних данных
+while (ob_get_level()) {
+    ob_end_clean();
+}
+
+header('Content-Type: application/json; charset=utf-8');
+
+try {
+    // Получаем параметры
+    $iblockId = intval($_POST['IBLOCK_ID'] ?? 0);
+    $propertyId = intval($_POST['PROPERTY_ID'] ?? 0);
+    $hlBlockId = intval($_POST['HL_BLOCK_ID'] ?? 0);
+    $offerIblockId = NULL;
+    
+    
+    if ($iblockId <= 0 || $propertyId <= 0 || $hlBlockId <= 0) {
+        throw new Exception('Invalid parameters');
+    }
+
+    // Получаем информацию о свойстве
+    $property = CIBlockProperty::GetByID($propertyId)->Fetch();
+    if (!$property) {
+        throw new Exception('Property not found');
+    }
+
+    // Получаем Highload-блок
+    $hlBlock = Bitrix\Highloadblock\HighloadBlockTable::getById($hlBlockId)->fetch();
+    if (!$hlBlock) {
+        throw new Exception('Highload block not found');
+    }
+
+    // Получаем значения для фильтрации
+    $hlEntity = Bitrix\Highloadblock\HighloadBlockTable::compileEntity($hlBlock);
+    $hlDataClass = $hlEntity->getDataClass();
+
+    // Получаем ID инфоблока торговых предложений
+    // $skuInfo = CCatalogSKU::GetInfoByProductIBlock($iblockId);
+    // if ($skuInfo) {
+    //     $offerIblockId = $skuInfo['IBLOCK_ID'];
+    // }
+    
+    $selectedValues = [];
+    if (!empty($_POST['VALUES'])) {
+        $selectedValues = json_decode($_POST['VALUES'], true) ?? [];
+    }
+    
+    $filterValues = [];
+    if (!empty($selectedValues)) {
+        $res = $hlDataClass::getList([
+            'filter' => ['ID' => $selectedValues],
+            'select' => ['ID', 'UF_NAME', 'UF_XML_ID']
+        ]);
+    } else {
+        $res = $hlDataClass::getList([
+            'select' => ['ID', 'UF_NAME', 'UF_XML_ID']
+        ]);
+    }
+    
+    while ($item = $res->fetch()) {
+        $filterValues[] = [
+            'ID' => $item['ID'],
+            'NAME' => $item['UF_NAME'],
+            'XML_ID' => $item['UF_XML_ID']
+        ];
+    }
+
+    // Создаём папку для логов если не существует
+    $logDir = $_SERVER['DOCUMENT_ROOT'] . '/upload/kk_price_update';
+    if (!is_dir($logDir)) {
+        mkdir($logDir, 0755, true);
+    }
+
+    // УПРОЩЕННАЯ ВЕРСИЯ - только первый товар
+    $logContent = [];
+    $totalProcessed = 0;
+    $successCount = 0;
+    $errorCount = 0;
+    
+    $logContent[] = "Начинаем обработку инфоблока ID: {$iblockId}";
+    $logContent[] = "Свойство: {$property['NAME']} (ID: {$property['ID']})";
+    $logContent[] = "Highload-блок: {$hlBlock['NAME']} (ID: {$hlBlock['ID']})";
+    $logContent[] = "Найдено значений для обработки: " . count($filterValues);
+    
+        // ОСНОВНОЙ ПРОЦЕСС - ВСЕ ТОВАРЫ
+    $logContent = [];
+    $errorIds = [];
+    $totalProcessed = 0;
+    $successCount = 0;
+    $errorCount = 0;
+    
+    $logContent[] = "Начинаем обработку инфоблока ID: {$iblockId}";
+    $logContent[] = "Свойство: {$property['NAME']} (ID: {$property['ID']})";
+    $logContent[] = "Highload-блок: {$hlBlock['NAME']} (ID: {$hlBlock['ID']})";
+    $logContent[] = "Найдено значений для обработки: " . count($filterValues);
+    
+    foreach ($filterValues as $value) {
+        try {
+            $logContent[] = "{$property['NAME']} - {$value['NAME']}, начинаем обработку...";
+            
+            // Поиск товаров
+            $elements = findElementsByXmlId($iblockId, $propertyId, $value['XML_ID']);
+            $elementCount = count($elements);
+            
+            $logContent[] = "Найдено товаров: {$elementCount}";
+            
+            if ($elementCount > 0) {
+                $logContent[] = "* Начинаем обработку товаров";
+                
+                $valueSuccessCount = 0;
+                $valueErrorCount = 0;
+                
+                $skuItems = CIBlockElement::GetList(
+                    [],
+                    [
+                        'ACTIVE' => 'Y',
+                        'PAREN_ID' => array_column('ID', $elements), 
+                    ]
+                )
+                 
+                
+                
+                
+                // Обрабатываем ВСЕ товары
+                foreach ($elements as $element) {
+                    try {
+                        $logContent[] = "  Обрабатываем товар ID: {$element['ID']}";
+                        
+                        // 1. Получаем свойства элемента
+                        $elementProperties = getElementHlProperties($element['ID'], $iblockId);
+                        $logContent[] = "    - Получено свойств: " . count($elementProperties);
+                        
+                        // 2. Рассчитываем общую стоимость
+                        $totalPrice = calculateTotalPrice($elementProperties);
+                        $logContent[] = "    - Рассчитанная цена: {$totalPrice} руб.";
+
+                        // 3. Проверяем наличие торговых предложений
+                        $offers = NULL;
+                        // if (!is_null($offerIblockId)){
+                        //     $offers = getProductOffers($element['ID'], $iblockId, $offerIblockId);
+                        //     $logContent[] = "    - Найдено торговых предложений: " . count($offers);
+                        // }
+
+                        // 4. Обновляем цену в каталоге
+                        if (is_null($offers)){
+                            $updateResult = updateCatalogPrice($element['ID'], $totalPrice);
+                        }else{
+                            $updateResult = updateCatalogPriceOffers($element['ID'], $offers, $totalPrice);
+                            
+                        }
+                        
+                        
+                        
+                        if ($updateResult) {
+                            $valueSuccessCount++;
+                            $successCount++;
+                            $logContent[] = "    ✓ Цена успешно обновлена";
+                        } else {
+                            $valueErrorCount++;
+                            $errorCount++;
+                            $errorIds[] = $element['ID'];
+                            $logContent[] = "    ✗ Ошибка обновления цены";
+                        }
+                        
+                        $totalProcessed++;
+                        
+                    } catch (Exception $e) {
+                        $valueErrorCount++;
+                        $errorCount++;
+                        $errorIds[] = $element['ID'];
+                        $logContent[] = "    ✗ Ошибка: " . $e->getMessage();
+                    }
+                }
+                
+                $logContent[] = "* Обработка завершена. Успешно: {$valueSuccessCount}, С ошибками: {$valueErrorCount}";
+            } else {
+                $logContent[] = "* Товары не найдены, пропускаем";
+            }
+            
+            $logContent[] = "";
+            
+        } catch (Exception $e) {
+            $logContent[] = "Ошибка при обработке {$value['NAME']}: " . $e->getMessage();
+            $errorCount++;
+        }
+    }
+        // Создаём файл с ошибками если есть
+    $errorFile = null;
+    if (!empty($errorIds)) {
+        $errorFilename = 'log-error-' . date('Y-m-d-H-i-s') . '.txt';
+        $errorFilePath = $logDir . '/' . $errorFilename;
+        file_put_contents($errorFilePath, implode("\n", array_unique($errorIds)));
+        $errorFile = '/upload/kk_price_update/' . $errorFilename;
+    }
+
+    $logContent[] = "Обработка завершена";
+    
+    // Формируем результат
+    $result = [
+        'success' => true,
+        'message' => "Обработка завершена",
+        'details' => $logContent,
+        'summary' => [
+            'total' => $totalProcessed,
+            'success' => $successCount,
+            'errors' => $errorCount
+        ]
+    ];
+    // Добавляем ссылку на файл с ошибками, если есть ошибки
+    if ($errorFile) {
+        $result['error_file'] = $errorFile;
+    }
+    
+    echo json_encode($result);
+
+
+} catch (Exception $e) {
+    echo json_encode([
+        'success' => false,
+        'message' => 'Ошибка: ' . $e->getMessage()
+    ]);
+}
+
+/**
+ * Простая функция поиска по XML_ID
+ */
+function findElementsByXmlId($iblockId, $propertyId, $xmlId) {
+    $elements = [];
+    
+    $res = CIBlockElement::GetList(
+        ['ID' => 'ASC'],
+        [
+            'IBLOCK_ID' => $iblockId,
+            'PROPERTY_' . $propertyId => $xmlId,
+            'ACTIVE' => 'Y'
+        ],
+        false,
+        false,
+        ['ID', 'NAME', 'IBLOCK_ID']
+    );
+    
+    while ($element = $res->Fetch()) {
+        $elements[] = $element;
+    }
+    
+    return $elements;
+}
+
+/**
+ * Получает все свойства элемента типа Highload-блок
+ */
+function getElementHlProperties($elementId, $iblockId) {
+    $properties = [];
+    
+    // Получаем все свойства элемента
+    $res = CIBlockElement::GetProperty($iblockId, $elementId);
+    while ($property = $res->Fetch()) {
+        if ($property['PROPERTY_TYPE'] == 'S' && $property['USER_TYPE'] == 'directory' && !empty($property['VALUE'])) {
+            $properties[] = [
+                'PROPERTY_ID' => $property['ID'],
+                'VALUE' => $property['VALUE'],
+                'USER_TYPE_SETTINGS' => $property['USER_TYPE_SETTINGS']
+            ];
+        }
+    }
+    
+    return $properties;
+}
+
+/**
+ * Рассчитывает общую стоимость на основе свойств Highload-блоков
+ */
+function calculateTotalPrice($properties) {
+    $totalPrice = 0;
+    
+    if (empty($properties)) {
+        return 0;
+    }
+    
+    foreach ($properties as $property) {
+        try {
+            if (empty($property['VALUE']) || empty($property['USER_TYPE_SETTINGS'])) {
+                continue;
+            }
+            
+            $value = trim($property['VALUE']);
+            $settings = $property['USER_TYPE_SETTINGS'];
+            
+            // Если настройки в строковом формате, десериализуем
+            if (is_string($settings)) {
+                $settings = @unserialize($settings);
+                if ($settings === false) {
+                    continue;
+                }
+            }
+            
+            if (!is_array($settings) || empty($settings['TABLE_NAME'])) {
+                continue;
+            }
+            
+            $tableName = $settings['TABLE_NAME'];
+            
+            // Ищем Highload-блок
+            $hlBlock = Bitrix\Highloadblock\HighloadBlockTable::getList([
+                'filter' => ['=TABLE_NAME' => $tableName],
+                'limit' => 1
+            ])->fetch();
+            
+            if (!$hlBlock) {
+                continue;
+            }
+            
+            // Компилируем сущность
+            $entity = Bitrix\Highloadblock\HighloadBlockTable::compileEntity($hlBlock);
+            $entityClass = $entity->getDataClass();
+            
+            // Ищем элемент по XML_ID
+            $hlElement = $entityClass::getList([
+                'filter' => ['=UF_XML_ID' => $value],
+                'select' => ['UF_PRICE'],
+                'limit' => 1
+            ])->fetch();
+            
+            if ($hlElement && isset($hlElement['UF_PRICE']) && is_numeric($hlElement['UF_PRICE'])) {
+                $price = (int)$hlElement['UF_PRICE'];
+                $totalPrice += $price;
+            }
+            
+        } catch (Exception $e) {
+            // Игнорируем ошибки в отдельных свойствах
+            continue;
+        }
+    }
+    
+    return $totalPrice;
+}
+
+/**
+ * Получает торговые предложения для элемента
+ */
+function getProductOffers($productId, $iblockId, $offerIblockId) {
+    $offers = [];
+    // Получаем все торговые предложения
+    $res = CIBlockElement::GetList(
+        ['ID' => 'ASC'],
+        [
+            'IBLOCK_ID' => $offerIblockId,
+            'PROPERTY_' . $skuInfo['SKU_PROPERTY_ID'] => $productId,
+            'ACTIVE' => 'Y'
+        ],
+        false,
+        false,
+        ['ID', 'NAME', 'IBLOCK_ID']
+    );
+    
+    while ($offer = $res->Fetch()) {
+        $offers[] = $offer;
+    }
+    
+    return $offers;
+}
+
+
+/**
+ * Упрощенная версия обновления цены (без торговых предложений)
+ */
+function updateCatalogPrice($elementId, $price) {
+    try {
+        // Проверяем, существует ли товар в каталоге
+        $product = CCatalogProduct::GetByID($elementId);
+        if ($product) {
+            // Обновляем базовую цену
+            $updateResult = CPrice::SetBasePrice($elementId, $price, 'RUB');
+            return $updateResult;
+        }
+    } catch (Exception $e) {
+        return false;
+    }
+}
+
+
+function updateCatalogPriceOffers($elementId, $offers, $price) {
+    try {
+        // Есть торговые предложения - обновляем их цены
+        $successCount = 0;
+        
+        foreach ($offers as $offer) {
+            try {
+                // Получаем свойства торгового предложения
+                $offerProperties = getElementHlProperties($offer['ID'], $offer['IBLOCK_ID']);
+                $offerPrice = calculateTotalPrice($offerProperties);
+                
+                // Общая цена = цена основного товара + цена комплектующих предложения
+                $totalOfferPrice = $price + $offerPrice;
+                
+                // Обновляем цену торгового предложения
+                $offerProduct = CCatalogProduct::GetByID($offer['ID']);
+                if ($offerProduct) {
+                    $updateResult = CPrice::SetBasePrice($offer['ID'], $totalOfferPrice, 'RUB');
+                    if ($updateResult) {
+                        $successCount++;
+                    }
+                }
+            } catch (Exception $e) {
+                // Продолжаем обработку других предложений при ошибке
+                continue;
+            }
+        }
+        
+            return $successCount > 0;
+
+        
+    } catch (Exception $e) {
+        return false;
+    }
+}
