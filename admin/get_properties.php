@@ -4,6 +4,9 @@ require_once $_SERVER['DOCUMENT_ROOT'] . '/bitrix/modules/main/include/prolog_ad
 use Bitrix\Main\Loader;
 use Bitrix\Iblock\PropertyTable;
 use Bitrix\Highloadblock\HighloadBlockTable;
+use KK\PriceUpdate\Exception\PricingException;
+use KK\PriceUpdate\Routing\PropertyMode;
+use KK\PriceUpdate\Routing\PropertyModeResolver;
 
 global $APPLICATION, $USER;
 if (!$USER->IsAdmin() || !check_bitrix_sessid()) {
@@ -12,6 +15,9 @@ if (!$USER->IsAdmin() || !check_bitrix_sessid()) {
 
 if (!Loader::includeModule('iblock') || !Loader::includeModule('highloadblock')) {
     die('Modules iblock and highloadblock are required.');
+}
+if (!Loader::includeModule('kk.price.update')) {
+    die('Module kk.price.update is required.');
 }
 
 $iblockId = intval($_REQUEST['IBLOCK_ID']);
@@ -31,8 +37,21 @@ try {
     ])->fetchAll();
 
     $highloadProperties = [];
+    $modeResolver = new PropertyModeResolver();
 
     foreach ($properties as $property) {
+        try {
+            $mode = $modeResolver->classifyForUi((string)$property['CODE']);
+        } catch (PricingException $exception) {
+            // Without optional KORSAC its reserved properties are not offered; legacy properties keep working.
+            if (strpos((string)$property['CODE'], 'KK_') === 0) {
+                continue;
+            }
+            $mode = PropertyMode::LEGACY;
+        }
+        if ($mode === PropertyMode::KORSAC_NON_DEFAULT) {
+            continue;
+        }
         $settings = unserialize($property['USER_TYPE_SETTINGS'], ['allowed_classes' => false]);
         if (isset($settings['TABLE_NAME'])) {
             // Получаем Highload-блок
@@ -47,7 +66,8 @@ try {
                         'ID' => $property['ID'],
                         'NAME' => $property['NAME'],
                         'CODE' => $property['CODE'],
-                        'HL_BLOCK_ID' => $hlBlock['ID']
+                        'HL_BLOCK_ID' => $hlBlock['ID'],
+                        'MODE' => $mode
                     ];
                 }
             }
@@ -64,7 +84,11 @@ try {
         
         foreach ($highloadProperties as $property) {
             echo '<option value="' . $property['ID'] . '" data-hl-block="' . $property['HL_BLOCK_ID'] . '">';
-            echo htmlspecialcharsbx($property['NAME']) . ' (' . $property['CODE'] . ')</option>';
+            echo htmlspecialcharsbx($property['NAME']) . ' (' . htmlspecialcharsbx($property['CODE']) . ')';
+            if ($property['MODE'] === PropertyMode::KORSAC_DEFAULT) {
+                echo ' [KORSAC]';
+            }
+            echo '</option>';
         }
         
         echo '</select>';

@@ -1,6 +1,38 @@
 # kk.price.update
 
-Модуль для 1С-Битрикс, который пересчитывает цены товаров и торговых предложений (SKU) на основе значений `UF_PRICE` из свойств типа **«Справочник»** (HL-блоки).
+Модуль для 1С-Битрикс с двумя изолированными режимами пересчёта каталожных цен.
+
+## Режимы ценообразования
+
+### Legacy Directory Pricing
+
+Обычные directory-свойства продолжают использовать прежний алгоритм: модуль суммирует
+`UF_PRICE` всех справочников товара и, при наличии SKU, рассчитывает предложения. Поведение
+King-Komp и семантика существующих корректировок не изменены.
+
+### KORSAC Default Pricing
+
+Каноническое свойство `KK_*_DEFAULT` маршрутизируется отдельно. Модуль `kk.korsac` читает
+`ProductConfiguration` и вычисляет стоимость default-конфигурации через
+`DefaultConfigurationCostCalculator`; `kk.price.update` применяет корректировку целочисленно
+в minor units и только затем записывает выбранный тип цены.
+
+`kk.korsac` является optional dependency: без него legacy-режим работает, а KORSAC-запрос
+завершается ошибкой `korsac_module_not_available`. `KK_*_OPTIONS` и
+`KK_*_MULTI_OPTIONS` **не обновляют base price**, скрыты в UI и отклоняются сервером. Их цены
+используются конфигуратором как delta. KORSAC-товары с SKU намеренно отклоняются.
+
+```text
+                  Property Mode Resolver
+                   /                  \
+       Legacy Directory Pricing   KORSAC Default Pricing
+                 |                         |
+       existing directory sum       kk.korsac calculator
+                                           |
+                                   costMinor + adjustment
+                                           |
+                                   BASE_CATALOG_PRICE
+```
 
 ## Что делает модуль
 
@@ -20,6 +52,8 @@
 - `admin/kk_price_update.php` — UI-страница модуля в админке.
 - `admin/start_update.php` — AJAX-контроллер запуска обновления.
 - `lib/Service/PriceUpdater.php` — основная бизнес-логика расчёта и обновления цен.
+- `lib/Routing/PropertyModeResolver.php` — безопасная маршрутизация свойств.
+- `lib/Pricing/` — KORSAC adapter и integer/minor-unit расчёты.
 
 ## Установка
 
@@ -31,6 +65,8 @@
    - `iblock`
    - `catalog`
    - `highloadblock`
+
+Для KORSAC-режима дополнительно нужен `kk.korsac`; для установки и legacy-режима он не требуется.
 
 ## Подготовка данных
 
@@ -58,6 +94,22 @@
 
 - Каталог логов: `/upload/kk_price_update/`
 - Файл ошибок создаётся на каждый запуск и содержит ID товаров, обработанных с ошибками.
+
+## Проверки
+
+Domain-тесты не требуют Битрикс или PHPUnit:
+
+```bash
+php tests/Unit/run.php
+```
+
+Read-only smoke загружает настоящий `kk.korsac`, считает цену и выводит JSON, но ничего не
+записывает в Catalog:
+
+```bash
+php local/modules/kk.price.update/tests/Integration/korsac_price_calculation_smoke.php \
+  --iblock=2 --product=4 --adjustment='+20%'
+```
 
 ## Важно
 

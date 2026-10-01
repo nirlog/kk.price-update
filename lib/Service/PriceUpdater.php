@@ -4,9 +4,26 @@ namespace KK\PriceUpdate\Service;
 
 use Bitrix\Highloadblock\HighloadBlockTable;
 use Exception;
+use KK\PriceUpdate\Pricing\KorsacDefaultCostProvider;
+use KK\PriceUpdate\Pricing\KorsacDefaultCostProviderInterface;
+use KK\PriceUpdate\Pricing\MinorMoney;
+use KK\PriceUpdate\Pricing\MinorPriceAdjustment;
+use KK\PriceUpdate\Routing\PropertyMode;
+use KK\PriceUpdate\Routing\PropertyModeResolver;
 
 class PriceUpdater
 {
+    private $modeResolver;
+    private $korsacCostProvider;
+    private $minorAdjustment;
+
+    public function __construct(?PropertyModeResolver $modeResolver = null, ?KorsacDefaultCostProviderInterface $korsacCostProvider = null, ?MinorPriceAdjustment $minorAdjustment = null)
+    {
+        $this->modeResolver = $modeResolver ?? new PropertyModeResolver();
+        $this->korsacCostProvider = $korsacCostProvider ?? new KorsacDefaultCostProvider();
+        $this->minorAdjustment = $minorAdjustment ?? new MinorPriceAdjustment();
+    }
+
     public function handle(array $params): array
     {
         $iblockId = (int)($params['IBLOCK_ID'] ?? 0);
@@ -29,6 +46,7 @@ class PriceUpdater
         if (!$property) {
             throw new Exception('Property not found');
         }
+        $mode = $this->modeResolver->resolve((string)$property['CODE']);
 
         $hlBlock = HighloadBlockTable::getById($hlBlockId)->fetch();
         if (!$hlBlock) {
@@ -94,7 +112,9 @@ class PriceUpdater
         }
 
         $value = $filterValues[$currentValueIndex];
-        $processResult = $this->processValue($value, $property, $iblockId, $propertyId, $hlDataClass, $skuInfo, $params, $logDir, $priceTypeIds, $priceAdjustments);
+        $processResult = $mode === PropertyMode::KORSAC_DEFAULT
+            ? $this->processKorsacValue($value, $property, $iblockId, $propertyId, $skuInfo, $params, $logDir, $priceTypeIds, $priceAdjustments)
+            : $this->processLegacyValue($value, $property, $iblockId, $propertyId, $hlDataClass, $skuInfo, $params, $logDir, $priceTypeIds, $priceAdjustments);
 
         return [
             'success' => true,
@@ -149,7 +169,7 @@ class PriceUpdater
         return $logDir;
     }
 
-    private function processValue(array $value, array $property, int $iblockId, int $propertyId, string $hlDataClass, ?array $skuInfo, array $params, string $logDir, array $priceTypeIds, array $priceAdjustments): array
+    private function processLegacyValue(array $value, array $property, int $iblockId, int $propertyId, string $hlDataClass, ?array $skuInfo, array $params, string $logDir, array $priceTypeIds, array $priceAdjustments): array
     {
         $logs = ["{$property['NAME']} - {$value['NAME']}, начинаем поиск товаров..."];
         $successCount = 0;
@@ -236,6 +256,63 @@ class PriceUpdater
         ];
     }
 
+    private function processKorsacValue(array $value, array $property, int $iblockId, int $propertyId, ?array $skuInfo, array $params, string $logDir, array $priceTypeIds, array $priceAdjustments): array
+    {
+        $logs = ["[KORSAC] {$property['NAME']} - {$value['NAME']}, начинаем поиск товаров..."];
+        $elements = $this->findElementsByXmlId($iblockId, $propertyId, $value['XML_ID']);
+        $logs[] = 'Найдено товаров: ' . count($elements);
+        $success = $errors = $skipped = $processed = 0;
+        $errorIds = [];
+
+        foreach ($elements as $element) {
+            $productId = (int)$element['ID'];
+            try {
+                if ($this->shouldSkipPriceUpdate($productId, $iblockId)) {
+                    $logs[] = "    - Товар ID {$productId} пропущен (NO_PRICE_UPDATE = N)";
+                    $skipped++;
+                    continue;
+                }
+                $offers = $skuInfo ? $this->getProductOffers($productId, $skuInfo) : [];
+                if ($offers) {
+                    throw new Exception('korsac_product_has_offers');
+                }
+                if (!\CCatalogProduct::GetByID($productId)) {
+                    throw new Exception('catalog_product_not_found');
+                }
+
+                $costMinor = $this->korsacCostProvider->getDefaultCostMinor($iblockId, $productId);
+                $logs[] = "[KORSAC] Товар #{$productId}";
+                $logs[] = 'DEFAULT_COMPONENT_COST: ' . MinorMoney::format($costMinor) . ' RUB';
+                foreach ($priceTypeIds as $typeId) {
+                    $adjustment = (string)($priceAdjustments[$typeId] ?? '');
+                    $priceMinor = $this->minorAdjustment->apply($costMinor, $adjustment);
+                    $logs[] = "Тип цены #{$typeId}";
+                    $logs[] = 'Корректировка: ' . ($adjustment === '' ? 'нет' : $adjustment);
+                    $logs[] = 'Новая цена: ' . MinorMoney::format($priceMinor) . ' RUB';
+                    if (!$this->setPriceByTypeMinor($productId, (int)$typeId, $priceMinor, 'RUB')) {
+                        throw new Exception('catalog_price_update_failed');
+                    }
+                }
+                $success++;
+                $processed++;
+            } catch (\Throwable $exception) {
+                $errors++;
+                $processed++;
+                $errorIds[] = $productId;
+                $logs[] = "    ✗ Ошибка при обработке товара ID {$productId}: " . $exception->getMessage();
+            }
+        }
+        if ($errorIds && !empty($params['error_file'])) {
+            file_put_contents($logDir . '/' . basename((string)$params['error_file']), implode("\n", $errorIds) . "\n", FILE_APPEND);
+        }
+        $logs[] = "* Обновление KORSAC-цен окончено. {$success} товаров - успешно. {$errors} товаров - с ошибкой.";
+        return [
+            'logs' => $logs, 'success_count' => $success, 'error_count' => $errors,
+            'offers_success' => 0, 'offers_processed' => 0,
+            'skipped_no_price_update_count' => $skipped, 'processed_elements' => $processed,
+        ];
+    }
+
     private function findElementsByXmlId(int $iblockId, int $propertyId, string $xmlId): array { /* same */
         $elements = [];
         $res = \CIBlockElement::GetList(['ID' => 'ASC'], ['IBLOCK_ID' => $iblockId, 'PROPERTY_' . $propertyId => $xmlId, 'ACTIVE' => 'Y'], false, false, ['ID', 'NAME', 'IBLOCK_ID']);
@@ -278,6 +355,14 @@ class PriceUpdater
             'PRICE' => $price,
             'CURRENCY' => $currency
         ]);
+    }
+    private function setPriceByTypeMinor(int $productId, int $priceTypeId, int $priceMinor, string $currency = 'RUB'): bool {
+        $price = MinorMoney::format($priceMinor);
+        $existing = \CPrice::GetList([], ['PRODUCT_ID' => $productId, 'CATALOG_GROUP_ID' => $priceTypeId])->Fetch();
+        if ($existing) {
+            return (bool)\CPrice::Update((int)$existing['ID'], ['PRICE' => $price, 'CURRENCY' => $currency]);
+        }
+        return (bool)\CPrice::Add(['PRODUCT_ID' => $productId, 'CATALOG_GROUP_ID' => $priceTypeId, 'PRICE' => $price, 'CURRENCY' => $currency]);
     }
     private function applyAdjustment(float $basePrice, string $adjustment): float {
         $adjustment = trim($adjustment);
