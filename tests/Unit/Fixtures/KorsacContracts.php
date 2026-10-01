@@ -45,11 +45,33 @@ final class HlOptionPriceProvider
 final class BitrixPricingPolicyProvider
 {
     public static $receivedArguments;
+    public static $exception;
 
     public function get(int $iblockId, int $priceTypeId): array
     {
         self::$receivedArguments = [$iblockId, $priceTypeId];
+        if (self::$exception instanceof \Throwable) {
+            $exception = self::$exception;
+            self::$exception = null;
+            throw $exception;
+        }
         return ['iblockId' => $iblockId, 'priceTypeId' => $priceTypeId];
+    }
+}
+
+final class ConfigurationPricingException extends \RuntimeException
+{
+    private $diagnosticData;
+
+    public function __construct(array $diagnostic)
+    {
+        $this->diagnosticData = $diagnostic;
+        parent::__construct((string)json_encode($diagnostic));
+    }
+
+    public function diagnostic(): array
+    {
+        return $this->diagnosticData;
     }
 }
 

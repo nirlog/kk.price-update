@@ -40,9 +40,7 @@ final class KorsacDefaultCatalogPriceProvider implements KorsacDefaultCatalogPri
         } catch (PricingException $exception) {
             throw $exception;
         } catch (\Throwable $exception) {
-            // KORSAC exception messages are stable operator-facing diagnostic codes.
-            $diagnostic = trim($exception->getMessage());
-            throw new PricingException($diagnostic !== '' ? $diagnostic : 'korsac_price_calculation_failed', (int)$exception->getCode(), $exception);
+            throw new PricingException($this->diagnosticCodeFromThrowable($exception), (int)$exception->getCode(), $exception);
         }
 
         if (!is_array($resultData) || !array_key_exists('totalMinor', $resultData)
@@ -51,5 +49,39 @@ final class KorsacDefaultCatalogPriceProvider implements KorsacDefaultCatalogPri
         }
 
         return $resultData['totalMinor'];
+    }
+
+    private function diagnosticCodeFromThrowable(\Throwable $exception): string
+    {
+        if (method_exists($exception, 'diagnostic')) {
+            try {
+                $diagnostic = $exception->diagnostic();
+                if (is_array($diagnostic) && array_key_exists('code', $diagnostic)) {
+                    $code = $this->safeDiagnosticValue($diagnostic['code']);
+                    if ($code !== null) {
+                        return $code;
+                    }
+                }
+            } catch (\Throwable $ignored) {
+                // Fall through to the safe message/fallback boundary below.
+            }
+        }
+
+        return $this->safeDiagnosticValue($exception->getMessage())
+            ?? 'korsac_price_calculation_failed';
+    }
+
+    private function safeDiagnosticValue($value): ?string
+    {
+        if (!is_string($value) && !is_int($value) && !is_float($value)) {
+            return null;
+        }
+
+        $value = trim((string)$value);
+        if ($value === '' || !preg_match('/^[A-Za-z0-9_.:-]+$/', $value)) {
+            return null;
+        }
+
+        return $value;
     }
 }

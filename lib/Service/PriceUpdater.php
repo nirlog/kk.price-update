@@ -114,7 +114,7 @@ class PriceUpdater
 
         $value = $filterValues[$currentValueIndex];
         $processResult = $mode === PropertyMode::KORSAC_DEFAULT
-            ? $this->processKorsacValue($value, $property, $iblockId, $propertyId, $skuInfo, $params, $logDir, $priceTypeIds)
+            ? $this->processKorsacValue($value, $property, $iblockId, $propertyId, $skuInfo, $params, $logDir, $priceTypeIds, $priceAdjustments)
             : $this->processLegacyValue($value, $property, $iblockId, $propertyId, $hlDataClass, $skuInfo, $params, $logDir, $priceTypeIds, $priceAdjustments);
 
         return [
@@ -257,8 +257,10 @@ class PriceUpdater
         ];
     }
 
-    private function processKorsacValue(array $value, array $property, int $iblockId, int $propertyId, ?array $skuInfo, array $params, string $logDir, array $priceTypeIds): array
+    private function processKorsacValue(array $value, array $property, int $iblockId, int $propertyId, ?array $skuInfo, array $params, string $logDir, array $priceTypeIds, array $priceAdjustments): array
     {
+        // Request values are accepted for compatibility but must never affect policy-derived prices.
+        unset($priceAdjustments);
         $logs = ["[KORSAC] {$property['NAME']} - {$value['NAME']}, начинаем поиск товаров..."];
         $elements = $this->findElementsByXmlId($iblockId, $propertyId, $value['XML_ID']);
         $logs[] = 'Найдено товаров: ' . count($elements);

@@ -8,6 +8,7 @@ spl_autoload_register(static function (string $class): void {
     require dirname(__DIR__, 2) . '/lib/' . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
 });
 require __DIR__ . '/Fixtures/KorsacContracts.php';
+require __DIR__ . '/Fixtures/PriceUpdaterBitrix.php';
 
 use KK\PriceUpdate\Exception\PricingException;
 use KK\PriceUpdate\Pricing\KorsacCatalogPricePlan;
@@ -17,6 +18,7 @@ use KK\PriceUpdate\Pricing\MinorMoney;
 use KK\PriceUpdate\Pricing\MinorPriceAdjustment;
 use KK\PriceUpdate\Routing\PropertyMode;
 use KK\PriceUpdate\Routing\PropertyModeResolver;
+use KK\PriceUpdate\Service\PriceUpdater;
 
 $tests = [];
 $test = static function (string $name, callable $callback) use (&$tests): void { $tests[$name] = $callback; };
@@ -53,6 +55,31 @@ $test('provider uses KORSAC policy and default catalog calculator', static funct
     $same(['iblockId' => 2, 'priceTypeId' => 2], \KK\Korsac\Pricing\DefaultCatalogPriceCalculator::$receivedPolicy);
     $same(['iblockId' => 2, 'productId' => 4], \KK\Korsac\Pricing\DefaultCatalogPriceCalculator::$receivedConfiguration);
 });
+$test('provider preserves missing pricing policy diagnostic code', static function () use ($throws): void {
+    \KK\Korsac\Pricing\BitrixPricingPolicyProvider::$exception = new \KK\Korsac\Pricing\ConfigurationPricingException([
+        'code' => 'pricing_policy_not_configured',
+    ]);
+    $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return true; });
+    $throws('pricing_policy_not_configured', static function () use ($provider): void {
+        $provider->getDefaultCatalogPriceMinor(2, 4, 3);
+    });
+});
+$test('provider preserves invalid pricing policy diagnostic code', static function () use ($throws): void {
+    \KK\Korsac\Pricing\BitrixPricingPolicyProvider::$exception = new \KK\Korsac\Pricing\ConfigurationPricingException([
+        'code' => 'invalid_pricing_policy',
+    ]);
+    $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return true; });
+    $throws('invalid_pricing_policy', static function () use ($provider): void {
+        $provider->getDefaultCatalogPriceMinor(2, 4, 2);
+    });
+});
+$test('provider uses safe generic exception message as fallback', static function () use ($throws): void {
+    \KK\Korsac\Pricing\BitrixPricingPolicyProvider::$exception = new RuntimeException('some_safe_message');
+    $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return true; });
+    $throws('some_safe_message', static function () use ($provider): void {
+        $provider->getDefaultCatalogPriceMinor(2, 4, 2);
+    });
+});
 $test('provider interface forwards iblock, product and price type', static function () use ($same): void {
     $received = [];
     $fake = new class($received) implements KorsacDefaultCatalogPriceProviderInterface {
@@ -88,6 +115,53 @@ $test('KORSAC plan fails before caller can write partial prices', static functio
 $test('missing KORSAC provider dependency fails explicitly', static function () use ($throws): void {
     $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return false; });
     $throws('korsac_module_not_available', static function () use ($provider): void { $provider->getDefaultCatalogPriceMinor(2, 4, 2); });
+});
+
+$invokeKorsacUpdater = static function (KorsacDefaultCatalogPriceProviderInterface $provider, array $priceTypeIds, array $priceAdjustments): array {
+    \CIBlockElement::$elements = [['ID' => 4, 'NAME' => 'Fixture product', 'IBLOCK_ID' => 2]];
+    \CPrice::$writes = [];
+    $updater = new PriceUpdater(new PropertyModeResolver(static function (): bool { return true; }), $provider, new MinorPriceAdjustment());
+    $method = new ReflectionMethod(PriceUpdater::class, 'processKorsacValue');
+    $method->setAccessible(true);
+    return $method->invoke(
+        $updater,
+        ['ID' => 10, 'NAME' => 'Fixture option', 'XML_ID' => 'fixture'],
+        ['NAME' => 'KORSAC default'],
+        2,
+        20,
+        null,
+        [],
+        sys_get_temp_dir(),
+        $priceTypeIds,
+        $priceAdjustments
+    );
+};
+$test('PriceUpdater ignores KORSAC PRICE_ADJUSTMENTS', static function () use ($same, $invokeKorsacUpdater): void {
+    $provider = new class implements KorsacDefaultCatalogPriceProviderInterface {
+        public function getDefaultCatalogPriceMinor(int $iblockId, int $productId, int $priceTypeId): int { return 3698800; }
+    };
+    $result = $invokeKorsacUpdater($provider, [2], [2 => '+999%']);
+    $same(1, $result['success_count']);
+    $same(0, $result['error_count']);
+    $same([[
+        'PRODUCT_ID' => 4,
+        'CATALOG_GROUP_ID' => 2,
+        'PRICE' => '36988.00',
+        'CURRENCY' => 'RUB',
+    ]], \CPrice::$writes);
+});
+$test('PriceUpdater makes no partial write when a KORSAC policy fails', static function () use ($same, $invokeKorsacUpdater): void {
+    $provider = new class implements KorsacDefaultCatalogPriceProviderInterface {
+        public function getDefaultCatalogPriceMinor(int $iblockId, int $productId, int $priceTypeId): int {
+            if ($priceTypeId === 3) { throw new PricingException('pricing_policy_not_configured'); }
+            return 3698800;
+        }
+    };
+    $result = $invokeKorsacUpdater($provider, [2, 3], []);
+    $same(0, $result['success_count']);
+    $same(1, $result['error_count']);
+    $same([], \CPrice::$writes);
+    $same(true, strpos(implode("\n", $result['logs']), 'pricing_policy_not_configured') !== false);
 });
 
 $adjust = new MinorPriceAdjustment();
