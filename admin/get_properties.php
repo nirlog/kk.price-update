@@ -83,7 +83,7 @@ try {
         echo '<option value="">- Выберите свойство -</option>';
         
         foreach ($highloadProperties as $property) {
-            echo '<option value="' . $property['ID'] . '" data-hl-block="' . $property['HL_BLOCK_ID'] . '">';
+            echo '<option value="' . $property['ID'] . '" data-hl-block="' . $property['HL_BLOCK_ID'] . '" data-mode="' . htmlspecialcharsbx($property['MODE']) . '">';
             echo htmlspecialcharsbx($property['NAME']) . ' (' . htmlspecialcharsbx($property['CODE']) . ')';
             if ($property['MODE'] === PropertyMode::KORSAC_DEFAULT) {
                 echo ' [KORSAC]';

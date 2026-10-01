@@ -10,8 +10,9 @@ spl_autoload_register(static function (string $class): void {
 require __DIR__ . '/Fixtures/KorsacContracts.php';
 
 use KK\PriceUpdate\Exception\PricingException;
-use KK\PriceUpdate\Pricing\KorsacDefaultCostProvider;
-use KK\PriceUpdate\Pricing\KorsacDefaultCostProviderInterface;
+use KK\PriceUpdate\Pricing\KorsacCatalogPricePlan;
+use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProvider;
+use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProviderInterface;
 use KK\PriceUpdate\Pricing\MinorMoney;
 use KK\PriceUpdate\Pricing\MinorPriceAdjustment;
 use KK\PriceUpdate\Routing\PropertyMode;
@@ -40,15 +41,54 @@ $test('KORSAC multi options rejected', static function () use ($throws, $resolve
 $test('non-canonical KORSAC-shaped property stays legacy', static function () use ($same, $resolver): void { $same(PropertyMode::LEGACY, $resolver->resolve('KK_UNKNOWN_DEFAULT')); });
 $test('missing KORSAC rejects KORSAC', static function () use ($throws): void { $r = new PropertyModeResolver(static function (): bool { return false; }); $throws('korsac_module_not_available', static function () use ($r): void { $r->resolve('KK_RAM_DEFAULT'); }); });
 $test('missing KORSAC preserves legacy', static function () use ($same): void { $r = new PropertyModeResolver(static function (): bool { return false; }); $same(PropertyMode::LEGACY, $r->resolve('MATERIAL')); });
-$test('provider uses gateway, repository get and result totalMinor', static function () use ($same): void {
-    $provider = new KorsacDefaultCostProvider(static function (): bool { return true; });
-    $same(3099000, $provider->getDefaultCostMinor(2, 4));
+$test('provider uses KORSAC policy and default catalog calculator', static function () use ($same): void {
+    $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return true; });
+    $same(3698800, $provider->getDefaultCatalogPriceMinor(2, 4, 2));
     $same(true, \KK\Korsac\Catalog\ProductConfigurationRepository::$receivedGateway instanceof \KK\Korsac\Catalog\BitrixCatalogPropertyGateway);
     $same([2, 4], \KK\Korsac\Catalog\ProductConfigurationRepository::$receivedArguments);
-    $same(['iblockId' => 2, 'productId' => 4], \KK\Korsac\Pricing\DefaultConfigurationCostCalculator::$receivedConfiguration);
-    $same(true, \KK\Korsac\Pricing\DefaultConfigurationCostCalculator::$receivedProvider instanceof \KK\Korsac\Pricing\HlOptionPriceProvider);
+    $same([2, 2], \KK\Korsac\Pricing\BitrixPricingPolicyProvider::$receivedArguments);
+    $same(true, \KK\Korsac\Pricing\RetailOptionPriceProvider::$receivedRawProvider instanceof \KK\Korsac\Pricing\HlOptionPriceProvider);
+    $same(['iblockId' => 2, 'priceTypeId' => 2], \KK\Korsac\Pricing\RetailOptionPriceProvider::$receivedPolicy);
+    $same(true, \KK\Korsac\Pricing\DefaultCatalogPriceCalculator::$receivedProvider instanceof \KK\Korsac\Pricing\RetailOptionPriceProvider);
+    $same(['iblockId' => 2, 'priceTypeId' => 2], \KK\Korsac\Pricing\DefaultCatalogPriceCalculator::$receivedPolicy);
+    $same(['iblockId' => 2, 'productId' => 4], \KK\Korsac\Pricing\DefaultCatalogPriceCalculator::$receivedConfiguration);
 });
-$test('provider interface supports fake', static function () use ($same): void { $fake = new class implements KorsacDefaultCostProviderInterface { public function getDefaultCostMinor(int $iblockId, int $productId): int { return $iblockId + $productId; } }; $same(6, $fake->getDefaultCostMinor(2, 4)); });
+$test('provider interface forwards iblock, product and price type', static function () use ($same): void {
+    $received = [];
+    $fake = new class($received) implements KorsacDefaultCatalogPriceProviderInterface {
+        private $received;
+        public function __construct(array &$received) { $this->received = &$received; }
+        public function getDefaultCatalogPriceMinor(int $iblockId, int $productId, int $priceTypeId): int { $this->received[] = [$iblockId, $productId, $priceTypeId]; return 3698800; }
+    };
+    $same([2 => 3698800], (new KorsacCatalogPricePlan($fake))->calculate(2, 4, [2]));
+    $same([[2, 4, 2]], $received);
+});
+$test('KORSAC plan calculates distinct prices and ignores local adjustments', static function () use ($same): void {
+    $fake = new class implements KorsacDefaultCatalogPriceProviderInterface {
+        public function getDefaultCatalogPriceMinor(int $iblockId, int $productId, int $priceTypeId): int { return [2 => 3698800, 3 => 3550000][$priceTypeId]; }
+    };
+    $dangerousAdjustments = [2 => '+999%', 3 => '-1000'];
+    $prices = (new KorsacCatalogPricePlan($fake))->calculate(2, 4, array_keys($dangerousAdjustments));
+    $same([2 => 3698800, 3 => 3550000], $prices);
+});
+$test('KORSAC plan fails before caller can write partial prices', static function () use ($same, $throws): void {
+    $fake = new class implements KorsacDefaultCatalogPriceProviderInterface {
+        public function getDefaultCatalogPriceMinor(int $iblockId, int $productId, int $priceTypeId): int {
+            if ($priceTypeId === 3) { throw new PricingException('pricing_policy_not_configured'); }
+            return 3698800;
+        }
+    };
+    $writes = [];
+    $throws('pricing_policy_not_configured', static function () use ($fake, &$writes): void {
+        $prices = (new KorsacCatalogPricePlan($fake))->calculate(2, 4, [2, 3]);
+        foreach ($prices as $typeId => $price) { $writes[] = [$typeId, $price]; }
+    });
+    $same([], $writes);
+});
+$test('missing KORSAC provider dependency fails explicitly', static function () use ($throws): void {
+    $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return false; });
+    $throws('korsac_module_not_available', static function () use ($provider): void { $provider->getDefaultCatalogPriceMinor(2, 4, 2); });
+});
 
 $adjust = new MinorPriceAdjustment();
 $test('fixed +1000', static function () use ($same, $adjust): void { $same(1200000 + 100000, $adjust->apply(1200000, '+1000')); });

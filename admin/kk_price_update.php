@@ -81,6 +81,10 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
                 <?php endwhile; ?>
             </select>
             <p style="margin: 6px 0 0; color: #666;">Можно выбрать несколько типов цен.</p>
+            <div id="korsac-pricing-note" style="display:none; margin-top:10px; padding:10px; background:#eef8ff; border-left:3px solid #3bc8f5;">
+                Для KORSAC цена рассчитывается по Pricing Policy модуля kk.korsac.<br>
+                Ручная корректировка цены в этом режиме не применяется.
+            </div>
             <div id="price-adjustments" style="margin-top: 10px;"></div>
         </div>
 
@@ -103,6 +107,7 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
         const priceTypesContainer = document.getElementById('price-types-container');
         const priceTypesSelect = document.getElementById('price-types-select');
         const priceAdjustments = document.getElementById('price-adjustments');
+        const korsacPricingNote = document.getElementById('korsac-pricing-note');
         const startUpdateBtn = document.getElementById('start-update-btn');
         const consoleLog = document.getElementById('console-log');
         const logContent = document.getElementById('log-content');
@@ -113,6 +118,7 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
         let currentIblockId = null;
         let currentPropertyId = null;
         let currentHlBlockId = null;
+        let currentPropertyMode = null;
         
         // Переменные для отслеживания состояния процесса
         let updateInProgress = false;
@@ -171,6 +177,8 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
             currentPropertyId = e.target.value;
             const selectedOption = e.target.options[e.target.selectedIndex];
             currentHlBlockId = selectedOption.getAttribute('data-hl-block');
+            currentPropertyMode = selectedOption.getAttribute('data-mode');
+            updateAdjustmentMode();
             
             if (!currentPropertyId || !currentHlBlockId) {
                 valuesContainer.style.display = 'none';
@@ -233,6 +241,7 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
                         '<input type="text" data-price-adjustment=\"' + option.value + '\" value=\"' + (defaults[option.value] || '') + '\" placeholder=\"Например: +1000, -2500, +20%, -10%\" style=\"min-width:280px; padding:4px;">';
                     priceAdjustments.appendChild(row);
                 });
+                updateAdjustmentMode();
             });
         }
 
@@ -299,7 +308,17 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
                     '<input type="text" data-price-adjustment=\"' + option.value + '\" placeholder=\"Например: +1000, -2500, +20%, -10%\" style=\"min-width:280px; padding:4px;\">';
                 priceAdjustments.appendChild(row);
             });
+            updateAdjustmentMode();
         });
+
+        function updateAdjustmentMode() {
+            const isKorsac = currentPropertyMode === 'korsac_default';
+            korsacPricingNote.style.display = isKorsac ? 'block' : 'none';
+            Array.from(priceAdjustments.querySelectorAll('[data-price-adjustment]')).forEach(input => {
+                input.disabled = isKorsac;
+            });
+            priceAdjustments.style.display = isKorsac ? 'none' : 'block';
+        }
 
         function processStep(step, selectedValues) {
             const formData = new FormData();
@@ -454,6 +473,8 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
             consoleLog.style.display = 'none';
             logContent.innerHTML = '';
             updateInProgress = false;
+            currentPropertyMode = null;
+            updateAdjustmentMode();
         }
     });
 </script>
