@@ -4,76 +4,40 @@ namespace KK\PriceUpdate\Pricing;
 
 use Bitrix\Main\Loader;
 use KK\PriceUpdate\Exception\PricingException;
+use KK\Korsac\Catalog\BitrixCatalogPropertyGateway;
+use KK\Korsac\Catalog\ProductConfigurationRepository;
+use KK\Korsac\Pricing\DefaultConfigurationCostCalculator;
+use KK\Korsac\Pricing\HlOptionPriceProvider;
 
 final class KorsacDefaultCostProvider implements KorsacDefaultCostProviderInterface
 {
     /** @var callable|null */
-    private $calculator;
+    private $moduleLoader;
 
-    public function __construct(?callable $calculator = null)
+    public function __construct(?callable $moduleLoader = null)
     {
-        $this->calculator = $calculator;
+        $this->moduleLoader = $moduleLoader;
     }
 
     public function getDefaultCostMinor(int $iblockId, int $productId): int
     {
-        if ($this->calculator) {
-            return $this->validate(call_user_func($this->calculator, $iblockId, $productId));
-        }
-        if (!Loader::includeModule('kk.korsac')) {
+        $available = $this->moduleLoader
+            ? (bool)call_user_func($this->moduleLoader)
+            : Loader::includeModule('kk.korsac');
+        if (!$available) {
             throw new PricingException('korsac_module_not_available');
         }
 
-        $repositoryClass = $this->firstClass([
-            'KK\\Korsac\\Repository\\ProductConfigurationRepository',
-            'KK\\Korsac\\ProductConfigurationRepository',
-        ]);
-        $providerClass = $this->firstClass([
-            'KK\\Korsac\\Pricing\\HlOptionPriceProvider',
-            'KK\\Korsac\\HlOptionPriceProvider',
-        ]);
-        $calculatorClass = $this->firstClass([
-            'KK\\Korsac\\Pricing\\DefaultConfigurationCostCalculator',
-            'KK\\Korsac\\DefaultConfigurationCostCalculator',
-        ]);
-        if (!$repositoryClass || !$providerClass || !$calculatorClass) {
-            throw new PricingException('korsac_pricing_api_not_available');
+        $repository = new ProductConfigurationRepository(new BitrixCatalogPropertyGateway());
+        $configuration = $repository->get($iblockId, $productId);
+        $result = (new DefaultConfigurationCostCalculator(new HlOptionPriceProvider()))
+            ->calculate($configuration);
+        $resultData = $result->toArray();
+        if (!is_array($resultData) || !array_key_exists('totalMinor', $resultData)) {
+            throw new PricingException('invalid_korsac_default_cost');
         }
 
-        $repository = new $repositoryClass();
-        $configuration = $this->invokeFirst($repository, ['getByProductId', 'findByProductId', 'get'], [$iblockId, $productId]);
-        $priceProvider = new $providerClass();
-        $calculator = new $calculatorClass($priceProvider);
-        $result = $this->invokeFirst($calculator, ['calculate', 'calculateDefaultCost'], [$configuration]);
-        if (is_object($result)) {
-            foreach (['getTotalMinor', 'totalMinor'] as $method) {
-                if (method_exists($result, $method)) {
-                    $result = $result->$method();
-                    break;
-                }
-            }
-        }
-        return $this->validate($result);
-    }
-
-    private function firstClass(array $classes): ?string
-    {
-        foreach ($classes as $class) {
-            if (class_exists($class)) {
-                return $class;
-            }
-        }
-        return null;
-    }
-
-    private function invokeFirst(object $object, array $methods, array $arguments)
-    {
-        foreach ($methods as $method) {
-            if (method_exists($object, $method)) {
-                return $object->$method(...$arguments);
-            }
-        }
-        throw new PricingException('korsac_pricing_api_not_available');
+        return $this->validate($resultData['totalMinor']);
     }
 
     private function validate($minor): int

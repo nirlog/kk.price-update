@@ -4,18 +4,19 @@ namespace KK\PriceUpdate\Routing;
 
 use Bitrix\Main\Loader;
 use KK\PriceUpdate\Exception\PricingException;
+use KK\Korsac\Catalog\PropertyCodeParser;
 
 final class PropertyModeResolver
 {
     /** @var callable|null */
     private $moduleLoader;
-    /** @var callable|null */
-    private $canonicalClassifier;
+    /** @var PropertyCodeParser|object|null */
+    private $parser;
 
-    public function __construct(?callable $moduleLoader = null, ?callable $canonicalClassifier = null)
+    public function __construct(?callable $moduleLoader = null, $parser = null)
     {
         $this->moduleLoader = $moduleLoader;
-        $this->canonicalClassifier = $canonicalClassifier;
+        $this->parser = $parser;
     }
 
     public function resolve(string $propertyCode): string
@@ -27,14 +28,18 @@ final class PropertyModeResolver
             throw new PricingException('korsac_module_not_available');
         }
 
-        $kind = $this->classifyCanonicalCode($propertyCode);
-        if ($kind === null) {
+        $parsed = $this->parseCanonicalCode($propertyCode);
+        if ($parsed === null) {
             return PropertyMode::LEGACY;
         }
-        if ($kind !== 'DEFAULT') {
+        $role = strtoupper((string)($parsed['role'] ?? ''));
+        if ($role === 'DEFAULT') {
+            return PropertyMode::KORSAC_DEFAULT;
+        }
+        if ($role === 'OPTIONS' || $role === 'MULTI_OPTIONS') {
             throw new PricingException('korsac_non_default_property_not_updatable');
         }
-        return PropertyMode::KORSAC_DEFAULT;
+        return PropertyMode::LEGACY;
     }
 
     public function classifyForUi(string $propertyCode): string
@@ -54,48 +59,14 @@ final class PropertyModeResolver
         return $this->moduleLoader ? (bool)call_user_func($this->moduleLoader) : Loader::includeModule('kk.korsac');
     }
 
-    private function classifyCanonicalCode(string $code): ?string
+    private function parseCanonicalCode(string $code): ?array
     {
-        if ($this->canonicalClassifier) {
-            $result = call_user_func($this->canonicalClassifier, $code);
-            return $result === null ? null : strtoupper((string)$result);
+        $parser = $this->parser ?? new PropertyCodeParser();
+        try {
+            $parsed = $parser->parse($code);
+        } catch (\Throwable $exception) {
+            return null;
         }
-
-        // KORSAC remains the source of truth: only a code accepted by its public parser/schema is routed.
-        $parserClasses = [
-            'KK\\Korsac\\Catalog\\PropertyCodeParser',
-            'KK\\Korsac\\Schema\\PropertyCodeParser',
-            'KK\\Korsac\\PropertyCodeParser',
-        ];
-        foreach ($parserClasses as $parserClass) {
-            if (!class_exists($parserClass)) {
-                continue;
-            }
-            foreach (['parse', 'fromCode', 'parseCode'] as $method) {
-                if (!is_callable([$parserClass, $method])) {
-                    continue;
-                }
-                try {
-                    $parsed = $parserClass::$method($code);
-                    if ($parsed === null || $parsed === false) {
-                        return null;
-                    }
-                    if (is_string($parsed)) {
-                        return strtoupper($parsed);
-                    }
-                    if (is_array($parsed)) {
-                        return strtoupper((string)($parsed['type'] ?? $parsed['kind'] ?? $parsed['suffix'] ?? '')) ?: null;
-                    }
-                    foreach (['getType', 'getKind', 'getSuffix'] as $getter) {
-                        if (is_object($parsed) && method_exists($parsed, $getter)) {
-                            return strtoupper((string)$parsed->$getter());
-                        }
-                    }
-                } catch (\Throwable $exception) {
-                    return null;
-                }
-            }
-        }
-        throw new PricingException('korsac_schema_api_not_available');
+        return is_array($parsed) ? $parsed : null;
     }
 }

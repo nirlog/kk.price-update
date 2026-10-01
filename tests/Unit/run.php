@@ -7,6 +7,7 @@ spl_autoload_register(static function (string $class): void {
     }
     require dirname(__DIR__, 2) . '/lib/' . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
 });
+require __DIR__ . '/Fixtures/KorsacContracts.php';
 
 use KK\PriceUpdate\Exception\PricingException;
 use KK\PriceUpdate\Pricing\KorsacDefaultCostProvider;
@@ -31,18 +32,22 @@ $throws = static function (string $message, callable $callback): void {
     throw new RuntimeException("Expected exception {$message}");
 };
 
-$classifier = static function (string $code): ?string {
-    $canonical = ['KK_RAM_DEFAULT' => 'DEFAULT', 'KK_RAM_OPTIONS' => 'OPTIONS', 'KK_SOFTWARE_MULTI_OPTIONS' => 'MULTI_OPTIONS'];
-    return $canonical[$code] ?? null;
-};
-$resolver = new PropertyModeResolver(static function (): bool { return true; }, $classifier);
+$resolver = new PropertyModeResolver(static function (): bool { return true; });
 $test('legacy routing', static function () use ($same, $resolver): void { $same(PropertyMode::LEGACY, $resolver->resolve('RAM')); });
-$test('KORSAC default routing', static function () use ($same, $resolver): void { $same(PropertyMode::KORSAC_DEFAULT, $resolver->resolve('KK_RAM_DEFAULT')); });
+$test('parser role routes canonical KORSAC default', static function () use ($same, $resolver): void { $same(PropertyMode::KORSAC_DEFAULT, $resolver->resolve('KK_RAM_DEFAULT')); });
 $test('KORSAC options rejected', static function () use ($throws, $resolver): void { $throws('korsac_non_default_property_not_updatable', static function () use ($resolver): void { $resolver->resolve('KK_RAM_OPTIONS'); }); });
 $test('KORSAC multi options rejected', static function () use ($throws, $resolver): void { $throws('korsac_non_default_property_not_updatable', static function () use ($resolver): void { $resolver->resolve('KK_SOFTWARE_MULTI_OPTIONS'); }); });
-$test('missing KORSAC rejects KORSAC', static function () use ($throws, $classifier): void { $r = new PropertyModeResolver(static function (): bool { return false; }, $classifier); $throws('korsac_module_not_available', static function () use ($r): void { $r->resolve('KK_RAM_DEFAULT'); }); });
-$test('missing KORSAC preserves legacy', static function () use ($same, $classifier): void { $r = new PropertyModeResolver(static function (): bool { return false; }, $classifier); $same(PropertyMode::LEGACY, $r->resolve('MATERIAL')); });
-$test('default cost adapter returns minor amount', static function () use ($same): void { $provider = new KorsacDefaultCostProvider(static function (): int { return 3099000; }); $same(3099000, $provider->getDefaultCostMinor(2, 4)); });
+$test('non-canonical KORSAC-shaped property stays legacy', static function () use ($same, $resolver): void { $same(PropertyMode::LEGACY, $resolver->resolve('KK_UNKNOWN_DEFAULT')); });
+$test('missing KORSAC rejects KORSAC', static function () use ($throws): void { $r = new PropertyModeResolver(static function (): bool { return false; }); $throws('korsac_module_not_available', static function () use ($r): void { $r->resolve('KK_RAM_DEFAULT'); }); });
+$test('missing KORSAC preserves legacy', static function () use ($same): void { $r = new PropertyModeResolver(static function (): bool { return false; }); $same(PropertyMode::LEGACY, $r->resolve('MATERIAL')); });
+$test('provider uses gateway, repository get and result totalMinor', static function () use ($same): void {
+    $provider = new KorsacDefaultCostProvider(static function (): bool { return true; });
+    $same(3099000, $provider->getDefaultCostMinor(2, 4));
+    $same(true, \KK\Korsac\Catalog\ProductConfigurationRepository::$receivedGateway instanceof \KK\Korsac\Catalog\BitrixCatalogPropertyGateway);
+    $same([2, 4], \KK\Korsac\Catalog\ProductConfigurationRepository::$receivedArguments);
+    $same(['iblockId' => 2, 'productId' => 4], \KK\Korsac\Pricing\DefaultConfigurationCostCalculator::$receivedConfiguration);
+    $same(true, \KK\Korsac\Pricing\DefaultConfigurationCostCalculator::$receivedProvider instanceof \KK\Korsac\Pricing\HlOptionPriceProvider);
+});
 $test('provider interface supports fake', static function () use ($same): void { $fake = new class implements KorsacDefaultCostProviderInterface { public function getDefaultCostMinor(int $iblockId, int $productId): int { return $iblockId + $productId; } }; $same(6, $fake->getDefaultCostMinor(2, 4)); });
 
 $adjust = new MinorPriceAdjustment();
