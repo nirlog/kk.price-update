@@ -22,8 +22,10 @@ if (!CModule::IncludeModule('iblock') || !CModule::IncludeModule('catalog') || !
     echo json_encode(['success' => false, 'message' => 'Modules not found']);
     exit;
 }
-
-require_once $_SERVER['DOCUMENT_ROOT'] . '/local/modules/kk.price.update/lib/Service/PriceUpdater.php';
+if (!\Bitrix\Main\Loader::includeModule('kk.price.update')) {
+    echo json_encode(['success' => false, 'message' => 'Module kk.price.update not found']);
+    exit;
+}
 
 try {
     $service = new \KK\PriceUpdate\Service\PriceUpdater();
