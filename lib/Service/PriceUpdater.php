@@ -4,8 +4,9 @@ namespace KK\PriceUpdate\Service;
 
 use Bitrix\Highloadblock\HighloadBlockTable;
 use Exception;
-use KK\PriceUpdate\Pricing\KorsacDefaultCostProvider;
-use KK\PriceUpdate\Pricing\KorsacDefaultCostProviderInterface;
+use KK\PriceUpdate\Pricing\KorsacCatalogPricePlan;
+use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProvider;
+use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProviderInterface;
 use KK\PriceUpdate\Pricing\MinorMoney;
 use KK\PriceUpdate\Pricing\MinorPriceAdjustment;
 use KK\PriceUpdate\Routing\PropertyMode;
@@ -14,13 +15,13 @@ use KK\PriceUpdate\Routing\PropertyModeResolver;
 class PriceUpdater
 {
     private $modeResolver;
-    private $korsacCostProvider;
+    private $korsacCatalogPriceProvider;
     private $minorAdjustment;
 
-    public function __construct(?PropertyModeResolver $modeResolver = null, ?KorsacDefaultCostProviderInterface $korsacCostProvider = null, ?MinorPriceAdjustment $minorAdjustment = null)
+    public function __construct(?PropertyModeResolver $modeResolver = null, ?KorsacDefaultCatalogPriceProviderInterface $korsacCatalogPriceProvider = null, ?MinorPriceAdjustment $minorAdjustment = null)
     {
         $this->modeResolver = $modeResolver ?? new PropertyModeResolver();
-        $this->korsacCostProvider = $korsacCostProvider ?? new KorsacDefaultCostProvider();
+        $this->korsacCatalogPriceProvider = $korsacCatalogPriceProvider ?? new KorsacDefaultCatalogPriceProvider();
         $this->minorAdjustment = $minorAdjustment ?? new MinorPriceAdjustment();
     }
 
@@ -258,6 +259,8 @@ class PriceUpdater
 
     private function processKorsacValue(array $value, array $property, int $iblockId, int $propertyId, ?array $skuInfo, array $params, string $logDir, array $priceTypeIds, array $priceAdjustments): array
     {
+        // Request values are accepted for compatibility but must never affect policy-derived prices.
+        unset($priceAdjustments);
         $logs = ["[KORSAC] {$property['NAME']} - {$value['NAME']}, начинаем поиск товаров..."];
         $elements = $this->findElementsByXmlId($iblockId, $propertyId, $value['XML_ID']);
         $logs[] = 'Найдено товаров: ' . count($elements);
@@ -280,14 +283,15 @@ class PriceUpdater
                     throw new Exception('catalog_product_not_found');
                 }
 
-                $costMinor = $this->korsacCostProvider->getDefaultCostMinor($iblockId, $productId);
+                // Resolve every policy and calculate every amount before the first Catalog write.
+                $targetPrices = (new KorsacCatalogPricePlan($this->korsacCatalogPriceProvider))
+                    ->calculate($iblockId, $productId, $priceTypeIds);
                 $logs[] = "[KORSAC] Товар #{$productId}";
-                $logs[] = 'DEFAULT_COMPONENT_COST: ' . MinorMoney::format($costMinor) . ' RUB';
-                foreach ($priceTypeIds as $typeId) {
-                    $adjustment = (string)($priceAdjustments[$typeId] ?? '');
-                    $priceMinor = $this->minorAdjustment->apply($costMinor, $adjustment);
+                foreach ($targetPrices as $typeId => $priceMinor) {
                     $logs[] = "Тип цены #{$typeId}";
-                    $logs[] = 'Корректировка: ' . ($adjustment === '' ? 'нет' : $adjustment);
+                    $logs[] = 'Источник цены: kk.korsac PricingPolicy';
+                    $logs[] = 'DEFAULT_CATALOG_PRICE: ' . MinorMoney::format($priceMinor) . ' RUB';
+                    $logs[] = 'Ручная корректировка: не применяется';
                     $logs[] = 'Новая цена: ' . MinorMoney::format($priceMinor) . ' RUB';
                     if (!$this->setPriceByTypeMinor($productId, (int)$typeId, $priceMinor, 'RUB')) {
                         throw new Exception('catalog_price_update_failed');

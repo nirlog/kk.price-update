@@ -42,27 +42,74 @@ final class HlOptionPriceProvider
 {
 }
 
-final class DefaultConfigurationCostCalculator
+final class BitrixPricingPolicyProvider
 {
-    public static $receivedProvider;
-    public static $receivedConfiguration;
+    public static $receivedArguments;
+    public static $exception;
 
-    public function __construct(HlOptionPriceProvider $provider)
+    public function get(int $iblockId, int $priceTypeId): array
     {
-        self::$receivedProvider = $provider;
-    }
-
-    public function calculate(array $configuration): DefaultCostResult
-    {
-        self::$receivedConfiguration = $configuration;
-        return new DefaultCostResult();
+        self::$receivedArguments = [$iblockId, $priceTypeId];
+        if (self::$exception instanceof \Throwable) {
+            $exception = self::$exception;
+            self::$exception = null;
+            throw $exception;
+        }
+        return ['iblockId' => $iblockId, 'priceTypeId' => $priceTypeId];
     }
 }
 
-final class DefaultCostResult
+final class ConfigurationPricingException extends \RuntimeException
+{
+    private $diagnosticData;
+
+    public function __construct(array $diagnostic)
+    {
+        $this->diagnosticData = $diagnostic;
+        parent::__construct((string)json_encode($diagnostic));
+    }
+
+    public function diagnostic(): array
+    {
+        return $this->diagnosticData;
+    }
+}
+
+final class RetailOptionPriceProvider
+{
+    public static $receivedRawProvider;
+    public static $receivedPolicy;
+
+    public function __construct(HlOptionPriceProvider $rawProvider, array $policy)
+    {
+        self::$receivedRawProvider = $rawProvider;
+        self::$receivedPolicy = $policy;
+    }
+}
+
+final class DefaultCatalogPriceCalculator
+{
+    public static $receivedProvider;
+    public static $receivedPolicy;
+    public static $receivedConfiguration;
+
+    public function __construct(RetailOptionPriceProvider $provider, array $policy)
+    {
+        self::$receivedProvider = $provider;
+        self::$receivedPolicy = $policy;
+    }
+
+    public function calculate(array $configuration): DefaultCatalogPriceResult
+    {
+        self::$receivedConfiguration = $configuration;
+        return new DefaultCatalogPriceResult();
+    }
+}
+
+final class DefaultCatalogPriceResult
 {
     public function toArray(): array
     {
-        return ['totalMinor' => 3099000];
+        return ['totalMinor' => 3698800];
     }
 }
