@@ -14,6 +14,8 @@ use KK\PriceUpdate\Exception\PricingException;
 use KK\PriceUpdate\Pricing\KorsacCatalogPricePlan;
 use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProvider;
 use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProviderInterface;
+use KK\PriceUpdate\Pricing\KorsacDiagnosticFormatter;
+use KK\PriceUpdate\Pricing\KorsacPricingPreflight;
 use KK\PriceUpdate\Pricing\MinorMoney;
 use KK\PriceUpdate\Pricing\MinorPriceAdjustment;
 use KK\PriceUpdate\Routing\PropertyMode;
@@ -73,6 +75,34 @@ $test('provider preserves invalid pricing policy diagnostic code', static functi
         $provider->getDefaultCatalogPriceMinor(2, 4, 2);
     });
 });
+$test('provider preserves and enriches structured diagnostics', static function () use ($same): void {
+    \KK\Korsac\Pricing\BitrixPricingPolicyProvider::$exception = new \KK\Korsac\Pricing\ConfigurationPricingException([
+        'code' => 'missing_option', 'group' => 'CASE', 'xmlId' => 'CASE_BAD',
+        'unsafe' => ['secret'],
+    ]);
+    try {
+        (new KorsacDefaultCatalogPriceProvider(static function (): bool { return true; }))
+            ->getDefaultCatalogPriceMinor(2, 4, 2);
+    } catch (PricingException $exception) {
+        $same([
+            'code' => 'missing_option', 'group' => 'CASE', 'xmlId' => 'CASE_BAD',
+            'iblockId' => 2, 'productId' => 4, 'priceTypeId' => 2,
+        ], $exception->diagnostic());
+        return;
+    }
+    throw new RuntimeException('Expected PricingException');
+});
+$test('provider hides unsafe throwable messages', static function () use ($same): void {
+    \KK\Korsac\Pricing\BitrixPricingPolicyProvider::$exception = new RuntimeException('SQL failed at /secret/file.php');
+    try {
+        (new KorsacDefaultCatalogPriceProvider(static function (): bool { return true; }))
+            ->getDefaultCatalogPriceMinor(2, 4, 2);
+    } catch (PricingException $exception) {
+        $same('korsac_price_calculation_failed', $exception->getMessage());
+        return;
+    }
+    throw new RuntimeException('Expected PricingException');
+});
 $test('provider uses safe generic exception message as fallback', static function () use ($throws): void {
     \KK\Korsac\Pricing\BitrixPricingPolicyProvider::$exception = new RuntimeException('some_safe_message');
     $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return true; });
@@ -115,6 +145,81 @@ $test('KORSAC plan fails before caller can write partial prices', static functio
 $test('missing KORSAC provider dependency fails explicitly', static function () use ($throws): void {
     $provider = new KorsacDefaultCatalogPriceProvider(static function (): bool { return false; });
     $throws('korsac_module_not_available', static function () use ($provider): void { $provider->getDefaultCatalogPriceMinor(2, 4, 2); });
+});
+
+$formatter = new KorsacDiagnosticFormatter();
+$test('diagnostic formatter renders option context', static function () use ($same, $formatter): void {
+    $same('missing_option — свойство KK_CPU_DEFAULT, группа CPU, значение AMD_OLD_ID', $formatter->format([
+        'code' => 'missing_option', 'propertyCode' => 'KK_CPU_DEFAULT', 'group' => 'CPU', 'xmlId' => 'AMD_OLD_ID',
+    ]));
+    $same('default_duplicated_in_options — группа CASE, значение CASE_BAD', $formatter->format([
+        'code' => 'default_duplicated_in_options', 'group' => 'CASE', 'xmlId' => 'CASE_BAD',
+    ]));
+});
+$test('diagnostic formatter renders policies and clean optional fields', static function () use ($same, $formatter): void {
+    $same('pricing_policy_not_configured — инфоблок #2, тип цены #1', $formatter->format([
+        'code' => 'pricing_policy_not_configured', 'iblockId' => 2, 'priceTypeId' => 1,
+    ]));
+    $same('invalid_pricing_policy — инфоблок #2, тип цены #1', $formatter->format([
+        'code' => 'invalid_pricing_policy', 'iblockId' => 2, 'priceTypeId' => 1,
+    ]));
+    $same('some_error_code', $formatter->format(['code' => 'some_error_code']));
+});
+
+$makePreflight = static function (array $existing, array $failures = [], bool $module = true): KorsacPricingPreflight {
+    $provider = new class($failures) {
+        private $failures;
+        public function __construct(array $failures) { $this->failures = $failures; }
+        public function get(int $iblockId, int $priceTypeId): array {
+            if (isset($this->failures[$priceTypeId])) {
+                throw new \KK\Korsac\Pricing\ConfigurationPricingException(['code' => $this->failures[$priceTypeId]]);
+            }
+            return ['iblockId' => $iblockId, 'priceTypeId' => $priceTypeId];
+        }
+    };
+    return new KorsacPricingPreflight(
+        static function () use ($module): bool { return $module; },
+        static function (int $id) use ($existing): bool { return in_array($id, $existing, true); },
+        static function () use ($provider) { return $provider; }
+    );
+};
+$test('preflight accepts one and multiple policies and normalizes IDs', static function () use ($same, $makePreflight): void {
+    $same([2], $makePreflight([2])->validate(2, [2]));
+    $same([2, 1], $makePreflight([1, 2])->validate(2, [2, 2, 0, -1, 'bad', 1]));
+});
+$test('preflight collects missing and invalid policy failures', static function () use ($makePreflight): void {
+    try {
+        $makePreflight([1, 2, 3], [1 => 'pricing_policy_not_configured', 3 => 'invalid_pricing_policy'])
+            ->validate(2, [1, 2, 3]);
+    } catch (PricingException $exception) {
+        if (strpos($exception->getMessage(), '#1: pricing_policy_not_configured') !== false
+            && strpos($exception->getMessage(), '#3: invalid_pricing_policy') !== false) { return; }
+        throw new RuntimeException('Preflight did not report every policy failure');
+    }
+    throw new RuntimeException('Expected preflight failure');
+});
+$test('preflight distinguishes missing Catalog price type', static function () use ($makePreflight): void {
+    try { $makePreflight([2])->validate(2, [2, 99]); }
+    catch (PricingException $exception) {
+        if (strpos($exception->getMessage(), '#99: catalog_price_type_not_found') !== false) { return; }
+        throw $exception;
+    }
+    throw new RuntimeException('Expected preflight failure');
+});
+$test('preflight rejects unavailable KORSAC module', static function () use ($throws, $makePreflight): void {
+    $throws('korsac_module_not_available', static function () use ($makePreflight): void {
+        $makePreflight([2], [], false)->validate(2, [2]);
+    });
+});
+$test('preflight failure prevents the product write phase', static function () use ($same, $makePreflight): void {
+    $writes = [];
+    try {
+        $makePreflight([2, 3], [3 => 'pricing_policy_not_configured'])->validate(2, [2, 3]);
+        $writes[] = ['unexpected write'];
+    } catch (PricingException $exception) {
+        $same('korsac_preflight_failed', $exception->diagnostic()['code']);
+    }
+    $same([], $writes);
 });
 
 $invokeKorsacUpdater = static function (KorsacDefaultCatalogPriceProviderInterface $provider, array $priceTypeIds, array $priceAdjustments): array {
