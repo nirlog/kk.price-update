@@ -31,9 +31,26 @@ try {
     $service = new \KK\PriceUpdate\Service\PriceUpdater();
     $result = $service->handle($_POST);
     echo json_encode($result);
-} catch (Exception $e) {
+} catch (\Throwable $e) {
+    if ($e instanceof \KK\PriceUpdate\Exception\PricingException) {
+        $diagnostic = $e->diagnostic();
+        $message = ($diagnostic['code'] ?? '') === 'korsac_preflight_failed'
+            ? $e->getMessage()
+            : (new \KK\PriceUpdate\Pricing\KorsacDiagnosticFormatter())->format($diagnostic);
+    } else {
+        $safeApplicationMessages = [
+            'Invalid parameters',
+            'Property not found',
+            'Highload block not found',
+            'No price types selected',
+            'Unknown step',
+        ];
+        $message = in_array($e->getMessage(), $safeApplicationMessages, true)
+            ? $e->getMessage()
+            : 'internal_update_error';
+    }
     echo json_encode([
         'success' => false,
-        'message' => 'Ошибка: ' . $e->getMessage()
+        'message' => 'Ошибка: ' . $message
     ]);
 }

@@ -7,6 +7,9 @@ use Exception;
 use KK\PriceUpdate\Pricing\KorsacCatalogPricePlan;
 use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProvider;
 use KK\PriceUpdate\Pricing\KorsacDefaultCatalogPriceProviderInterface;
+use KK\PriceUpdate\Pricing\KorsacDiagnosticFormatter;
+use KK\PriceUpdate\Pricing\KorsacPricingPreflight;
+use KK\PriceUpdate\Pricing\KorsacPricingPreflightInterface;
 use KK\PriceUpdate\Pricing\MinorMoney;
 use KK\PriceUpdate\Pricing\MinorPriceAdjustment;
 use KK\PriceUpdate\Routing\PropertyMode;
@@ -17,12 +20,16 @@ class PriceUpdater
     private $modeResolver;
     private $korsacCatalogPriceProvider;
     private $minorAdjustment;
+    private $korsacPreflight;
+    private $diagnosticFormatter;
 
-    public function __construct(?PropertyModeResolver $modeResolver = null, ?KorsacDefaultCatalogPriceProviderInterface $korsacCatalogPriceProvider = null, ?MinorPriceAdjustment $minorAdjustment = null)
+    public function __construct(?PropertyModeResolver $modeResolver = null, ?KorsacDefaultCatalogPriceProviderInterface $korsacCatalogPriceProvider = null, ?MinorPriceAdjustment $minorAdjustment = null, ?KorsacPricingPreflightInterface $korsacPreflight = null, ?KorsacDiagnosticFormatter $diagnosticFormatter = null)
     {
         $this->modeResolver = $modeResolver ?? new PropertyModeResolver();
         $this->korsacCatalogPriceProvider = $korsacCatalogPriceProvider ?? new KorsacDefaultCatalogPriceProvider();
         $this->minorAdjustment = $minorAdjustment ?? new MinorPriceAdjustment();
+        $this->korsacPreflight = $korsacPreflight ?? new KorsacPricingPreflight();
+        $this->diagnosticFormatter = $diagnosticFormatter ?? new KorsacDiagnosticFormatter();
     }
 
     public function handle(array $params): array
@@ -59,18 +66,36 @@ class PriceUpdater
         $skuInfo = \CCatalogSKU::GetInfoByProductIBlock($iblockId);
 
         $selectedValues = [];
+        $rawPriceTypeIds = [];
         $priceTypeIds = [];
         $priceAdjustments = [];
         if (!empty($params['VALUES'])) {
             $selectedValues = json_decode((string)$params['VALUES'], true) ?? [];
         }
         if (!empty($params['PRICE_TYPES'])) {
-            $priceTypeIds = array_values(array_filter(array_map('intval', json_decode((string)$params['PRICE_TYPES'], true) ?? [])));
+            $decodedPriceTypeIds = json_decode((string)$params['PRICE_TYPES'], true);
+            $rawPriceTypeIds = is_array($decodedPriceTypeIds) ? $decodedPriceTypeIds : [];
         }
         if (!empty($params['PRICE_ADJUSTMENTS'])) {
             $priceAdjustments = json_decode((string)$params['PRICE_ADJUSTMENTS'], true) ?? [];
         }
-        if (empty($priceTypeIds)) {
+        $preflightLog = null;
+        if ($mode === PropertyMode::KORSAC_DEFAULT) {
+            // Do not coerce untrusted KORSAC IDs: values such as "2foo" or 2.5 are invalid.
+            $priceTypeIds = KorsacPricingPreflight::normalizePriceTypeIds($rawPriceTypeIds);
+            if ($priceTypeIds) {
+                // AJAX steps are stateless. Validate every request that can reach product writes.
+                $priceTypeIds = $this->korsacPreflight->validate($iblockId, $priceTypeIds);
+            }
+            if ($step === 'init') {
+                $preflightLog = '[KORSAC] Preflight PricingPolicy: OK. Типы цен: '
+                    . implode(', ', array_map(static function (int $id): string { return '#' . $id; }, $priceTypeIds));
+            }
+        } else {
+            // Preserve the historical Legacy coercion semantics.
+            $priceTypeIds = array_values(array_filter(array_map('intval', $rawPriceTypeIds)));
+        }
+        if (!$priceTypeIds) {
             throw new Exception('No price types selected');
         }
 
@@ -86,7 +111,9 @@ class PriceUpdater
                 'step' => 'init',
                 'total_values' => count($filterValues),
                 'error_file' => '/upload/kk_price_update/' . $errorFilename,
-                'message' => 'Начинаем обработку ' . count($filterValues) . ' значений'
+                'logs' => $preflightLog ? [$preflightLog] : [],
+                'message' => ($preflightLog ? $preflightLog . "\n" : '')
+                    . 'Начинаем обработку ' . count($filterValues) . ' значений'
             ];
         }
 
@@ -266,6 +293,7 @@ class PriceUpdater
         $logs[] = 'Найдено товаров: ' . count($elements);
         $success = $errors = $skipped = $processed = 0;
         $errorIds = [];
+        $diagnostics = [];
 
         foreach ($elements as $element) {
             $productId = (int)$element['ID'];
@@ -303,7 +331,13 @@ class PriceUpdater
                 $errors++;
                 $processed++;
                 $errorIds[] = $productId;
-                $logs[] = "    ✗ Ошибка при обработке товара ID {$productId}: " . $exception->getMessage();
+                $pricingException = \KK\PriceUpdate\Exception\PricingException::fromThrowable($exception, [
+                    'iblockId' => $iblockId,
+                    'productId' => $productId,
+                ]);
+                $diagnostic = $pricingException->diagnostic();
+                $diagnostics[] = $diagnostic;
+                $logs[] = "    ✗ Товар #{$productId}: " . $this->diagnosticFormatter->format($diagnostic);
             }
         }
         if ($errorIds && !empty($params['error_file'])) {
@@ -314,6 +348,7 @@ class PriceUpdater
             'logs' => $logs, 'success_count' => $success, 'error_count' => $errors,
             'offers_success' => 0, 'offers_processed' => 0,
             'skipped_no_price_update_count' => $skipped, 'processed_elements' => $processed,
+            'diagnostics' => $diagnostics,
         ];
     }
 
