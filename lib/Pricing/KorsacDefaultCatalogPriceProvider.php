@@ -27,7 +27,10 @@ final class KorsacDefaultCatalogPriceProvider implements KorsacDefaultCatalogPri
             ? (bool)call_user_func($this->moduleLoader)
             : Loader::includeModule('kk.korsac');
         if (!$available) {
-            throw new PricingException('korsac_module_not_available');
+            throw new PricingException('korsac_module_not_available', [
+                'code' => 'korsac_module_not_available', 'iblockId' => $iblockId,
+                'productId' => $productId, 'priceTypeId' => $priceTypeId,
+            ]);
         }
 
         try {
@@ -37,10 +40,12 @@ final class KorsacDefaultCatalogPriceProvider implements KorsacDefaultCatalogPri
             $retailPrices = new RetailOptionPriceProvider(new HlOptionPriceProvider(), $policy);
             $result = (new DefaultCatalogPriceCalculator($retailPrices, $policy))->calculate($configuration);
             $resultData = $result->toArray();
-        } catch (PricingException $exception) {
-            throw $exception;
         } catch (\Throwable $exception) {
-            throw new PricingException($this->diagnosticCodeFromThrowable($exception), (int)$exception->getCode(), $exception);
+            throw PricingException::fromThrowable($exception, [
+                'iblockId' => $iblockId,
+                'productId' => $productId,
+                'priceTypeId' => $priceTypeId,
+            ]);
         }
 
         if (!is_array($resultData) || !array_key_exists('totalMinor', $resultData)
@@ -51,37 +56,4 @@ final class KorsacDefaultCatalogPriceProvider implements KorsacDefaultCatalogPri
         return $resultData['totalMinor'];
     }
 
-    private function diagnosticCodeFromThrowable(\Throwable $exception): string
-    {
-        if (method_exists($exception, 'diagnostic')) {
-            try {
-                $diagnostic = $exception->diagnostic();
-                if (is_array($diagnostic) && array_key_exists('code', $diagnostic)) {
-                    $code = $this->safeDiagnosticValue($diagnostic['code']);
-                    if ($code !== null) {
-                        return $code;
-                    }
-                }
-            } catch (\Throwable $ignored) {
-                // Fall through to the safe message/fallback boundary below.
-            }
-        }
-
-        return $this->safeDiagnosticValue($exception->getMessage())
-            ?? 'korsac_price_calculation_failed';
-    }
-
-    private function safeDiagnosticValue($value): ?string
-    {
-        if (!is_string($value) && !is_int($value) && !is_float($value)) {
-            return null;
-        }
-
-        $value = trim((string)$value);
-        if ($value === '' || !preg_match('/^[A-Za-z0-9_.:-]+$/', $value)) {
-            return null;
-        }
-
-        return $value;
-    }
 }

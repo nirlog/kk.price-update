@@ -384,6 +384,14 @@ echo "<p>Найдено каталогов: " . count($catalogIblocks) . "</p>";
         function handleInitResponse(response, selectedValues) {
             currentProcessState.totalValues = response.total_values;
             currentProcessState.errorFile = response.error_file;
+
+            if (response.logs && response.logs.length > 0) {
+                response.logs.forEach(log => {
+                    const logElement = document.createElement('p');
+                    logElement.textContent = log;
+                    logContent.appendChild(logElement);
+                });
+            }
             
             logContent.innerHTML += '<p>Инициализация завершена. Всего значений для обработки: ' + response.total_values + '</p>';
             logContent.innerHTML += '<p>Начинаем обработку...</p>';
